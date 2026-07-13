@@ -1,7 +1,7 @@
 # 把本文件放到你 Fork 后的仓库的  .github/workflows/build-bt-rb300-512m.yml
 # 然后到仓库 Actions 页手动 Run workflow（或 push 到 openwrt-24.10-6.6 分支即可自动触发）
 
-name: Build ImmortalWrt (BT-RB300 / 512MB)
+name: Build ImmortalWrt (BT-RB300 / 256MB)
 
 on:
   workflow_dispatch:
@@ -80,5 +80,5 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-bt-rb300-512mb
+          name: immortalwrt-bt-rb300-256mb
           path: bin/targets/mediatek/filogic/*
