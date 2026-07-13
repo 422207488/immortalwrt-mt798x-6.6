@@ -8,7 +8,7 @@ on:
   push:
     branches: [openwrt-24.10-6.6]
     paths:
-      - '.github/workflows/build-bt-rb300-512m.yml'
+      - '.github/workflows/build-bt-rb300-256m.yml'
 
 jobs:
   build:
