@@ -22,6 +22,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 发布 Release 需要写仓库内容的权限
+    permissions:
+      contents: write
     steps:
       - name: Free disk space
         run: |
@@ -124,8 +127,35 @@ jobs:
         run: |
           make -j$(nproc) || make -j1 V=s
 
-      - name: Upload firmware
+      - name: Upload firmware (Artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-bt-rb300-512mb
           path: bin/targets/mediatek/filogic/*
+
+      # 收集固件、生成一个带时间戳的 tag 供 Release 使用
+      - name: Prepare release assets
+        id: prep
+        run: |
+          mkdir -p release
+          # 只取 bt-rb300 的固件与校验/配置文件，避免把整目录都传上去
+          cp bin/targets/mediatek/filogic/*bt-rb300* release/ 2>/dev/null || true
+          cp bin/targets/mediatek/filogic/*.buildinfo release/ 2>/dev/null || true
+          cp bin/targets/mediatek/filogic/sha256sums release/ 2>/dev/null || true
+          echo "== release assets ==" && ls -lh release/
+          echo "tag=bt-rb300-512m-$(date +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+          echo "driver=${{ github.event.inputs.wifi_driver || 'mainline' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prep.outputs.tag }}
+          name: "BT-RB300 512MB (${{ steps.prep.outputs.driver }}) ${{ steps.prep.outputs.tag }}"
+          body: |
+            ImmortalWrt for BT-RB300 (改 512MB 内存版)
+            - WiFi 驱动: ${{ steps.prep.outputs.driver }}
+            - 分支: openwrt-24.10-6.6
+            - 首刷用 *factory.bin*，升级用 *sysupgrade.bin*
+          files: release/*
+          draft: false
+          prerelease: false
