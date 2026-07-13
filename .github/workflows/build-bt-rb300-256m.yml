@@ -5,6 +5,15 @@ name: Build ImmortalWrt (BT-RB300 / 256MB)
 
 on:
   workflow_dispatch:
+    inputs:
+      wifi_driver:
+        description: 'WiFi 驱动选择：mainline = 主线 mt76/mt7915e（稳，推荐）；closed = MTK 闭源 mt_wifi + warp（性能高，但预编译 warp）'
+        required: true
+        default: 'mainline'
+        type: choice
+        options:
+          - mainline
+          - closed
   push:
     branches: [openwrt-24.10-6.6]
     paths:
@@ -38,7 +47,6 @@ jobs:
             pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync \
             scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
-
       - name: Update & install feeds
         run: |
           ./scripts/feeds update -a
@@ -51,27 +59,58 @@ jobs:
           sed -i '/CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_/d' .config
           echo 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_bt_rb300=y' >> .config
           echo 'CONFIG_AUTOREMOVE=y' >> .config
-          # 用主线 mt76/mt7915e 驱动替代私有 mtk_wifi 闭源驱动，
-          # 避免 warp_proxy 找不到 warp_wifi.h 导致编译失败。
-          # BT-RB300 的设备包本来就是 kmod-mt7915e（主线），去掉闭源驱动不影响 WiFi。
-          sed -i '/CONFIG_PACKAGE_kmod-mt_wifi/d' .config
-          sed -i '/CONFIG_PACKAGE_kmod-warp/d' .config
-          sed -i '/CONFIG_PACKAGE_luci-app-mtwifi-cfg/d' .config
-          sed -i '/CONFIG_PACKAGE_luci-app-eqos-mtk/d' .config
-          sed -i '/CONFIG_PACKAGE_luci-app-turboacc-mtk/d' .config
+          # ===== WiFi 驱动选择（由 workflow_dispatch 输入 wifi_driver 决定）=====
+          if [ "${{ github.event.inputs.wifi_driver }}" = "closed" ]; then
+            # 闭源 MTK 私有驱动 mt_wifi + warp（defconfig 默认已全局勾选，这里仅确保进镜像）
+            echo 'CONFIG_PACKAGE_kmod-mt_wifi=y' >> .config
+            echo 'CONFIG_PACKAGE_kmod-warp=y' >> .config
+            echo 'CONFIG_PACKAGE_luci-app-mtwifi-cfg=y' >> .config
+            # PER_DEVICE_ROOTFS 模式下，设备的包由 device-packages 字符串决定，
+            # 必须显式写入，否则 defconfig 不会把闭源驱动打进单设备的镜像。
+            echo 'CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_bt_rb300="kmod-mt_wifi kmod-warp luci-app-mtwifi-cfg luci-app-eqos-mtk luci-app-turboacc-mtk"' >> .config
+          else
+            # 默认：主线 mt76/mt7915e 驱动，剔掉闭源驱动避免 warp_proxy 报
+            # "warp_wifi.h: No such file" 错误。
+            sed -i '/CONFIG_PACKAGE_kmod-mt_wifi/d' .config
+            sed -i '/CONFIG_PACKAGE_kmod-warp/d' .config
+            sed -i '/CONFIG_PACKAGE_luci-app-mtwifi-cfg/d' .config
+            sed -i '/CONFIG_PACKAGE_luci-app-eqos-mtk/d' .config
+            sed -i '/CONFIG_PACKAGE_luci-app-turboacc-mtk/d' .config
+            # PER_DEVICE_ROOTFS 模式下设备的 WiFi 驱动由 device-packages 字符串决定，
+            # 必须显式写入主线 mt76 驱动与固件，否则 defconfig 不会自动带 mt7915e。
+            echo 'CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_bt_rb300="kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware"' >> .config
+            # 同时写全局 =y 双保险，确保模块一定被编进内核
+            echo 'CONFIG_PACKAGE_kmod-mt7915e=y' >> .config
+            echo 'CONFIG_PACKAGE_kmod-mt7981-firmware=y' >> .config
+            echo 'CONFIG_PACKAGE_mt7981-wo-firmware=y' >> .config
+          fi
           make defconfig
           ./scripts/diffconfig.sh
 
-      - name: Verify BT-RB300 is enabled
+      - name: Verify configuration
         run: |
           grep -q 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_bt_rb300=y' .config \
             || { echo "!! bt-rb300 NOT enabled, abort"; exit 1; }
-          # 确认已切到主线驱动：闭源 mt_wifi 不应存在，主线 mt7915e 应存在
-          if grep -q 'CONFIG_PACKAGE_kmod-mt_wifi=y' .config; then
-            echo "!! kmod-mt_wifi still selected, abort"; exit 1
+          if [ "${{ github.event.inputs.wifi_driver }}" = "closed" ]; then
+            grep -q 'CONFIG_PACKAGE_kmod-mt_wifi=y' .config \
+              || { echo "!! closed driver requested but kmod-mt_wifi missing, abort"; exit 1; }
+          else
+            if grep -q 'CONFIG_PACKAGE_kmod-mt_wifi=y' .config; then
+              echo "!! kmod-mt_wifi still selected (mainline mode), abort"; exit 1
+            fi
+            # 主线驱动：kmod-mt7915e 必须进配置（可能在 device-packages 字符串里）
+            grep -q 'kmod-mt7915e' .config \
+              || { echo "!! kmod-mt7915e (mainline) missing, abort"; exit 1; }
           fi
-          grep -q 'CONFIG_PACKAGE_kmod-mt7915e=y' .config \
-            || { echo "!! kmod-mt7915e (mainline) missing, abort"; exit 1; }
+
+      # 闭源路径专用：warp_proxy 插件需要 warp 包生成的 warp_wifi.h，
+      # 必须先用单线程把 warp 编完（生成并安装头文件到 staging），再整体编译，
+      # 否则并行构建会抢跑报 "warp_wifi.h: No such file" 。
+      - name: Pre-build warp (closed driver only)
+        if: ${{ github.event.inputs.wifi_driver == 'closed' }}
+        run: |
+          make package/mtk/drivers/warp/compile -j$(nproc) \
+            || make package/mtk/drivers/warp/compile -j1 V=s
 
       - name: Build
         run: |
